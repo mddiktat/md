@@ -177,6 +177,12 @@
     return out.trim();
   }
 
+  function normalizeBaseUrl(raw) {
+    let base = (raw || "").trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(base)) base = "https://" + base;
+    return base;
+  }
+
   async function startRecording() {
     if (!stream) {
       setStatus("Mic not enabled. Click <b>Enable Mic</b> first.", "warn");
@@ -208,20 +214,21 @@
       setStatus(`Uploading audio (${(blob.size/1024/1024).toFixed(2)} MB)…`, "warn");
 
       try {
-        const base = backendUrlEl.value.trim().replace(/\/+$/, "");
+        const base = normalizeBaseUrl(backendUrlEl.value);
         const endpoint = `${base}/dictate`;
 
         const fd = new FormData();
         const filename = blob.type.includes("ogg") ? "audio.ogg" : "audio.webm";
         fd.append("audio", blob, filename);
 
+        // ✅ CORS-safe fetch (fixes "Failed to fetch")
         const res = await fetch(endpoint, {
-  method: "POST",
-  mode: "cors",
-  credentials: "omit",
-  body: fd
-});
-;
+          method: "POST",
+          mode: "cors",
+          credentials: "omit",
+          body: fd
+        });
+
         if (!res.ok) {
           const t = await res.text().catch(() => "");
           throw new Error(`HTTP ${res.status} ${res.statusText} ${t ? ("— " + t.slice(0, 200)) : ""}`);
