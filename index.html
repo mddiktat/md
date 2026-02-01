@@ -1,18 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Dictation → Arztbrief</title>
+  <title>Dictation → Arztbrief (Gemini)</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; max-width: 980px; }
     h1 { font-size: 20px; margin: 0 0 12px; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
     button { padding: 10px 14px; border: 1px solid #ccc; background: #fff; border-radius: 10px; cursor: pointer; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
-    select, input[type="text"] { padding: 10px 12px; border: 1px solid #ccc; border-radius: 10px; }
+    input[type="text"] { padding: 10px 12px; border: 1px solid #ccc; border-radius: 10px; width: 520px; }
     .status { padding: 10px 12px; border: 1px solid #e5e5e5; background: #fafafa; border-radius: 10px; }
-    textarea { width: 100%; min-height: 360px; padding: 12px; border: 1px solid #ccc; border-radius: 12px;
+    textarea { width: 100%; min-height: 320px; padding: 12px; border: 1px solid #ccc; border-radius: 12px;
                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
     .small { color: #555; font-size: 12px; }
     .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; border: 1px solid #ddd; background: #fff; font-size: 12px; }
@@ -22,151 +22,72 @@
   </style>
 </head>
 <body>
-  <h1>Medical Dictation → Copy-ready Brief</h1>
+  <h1>Medical Dictation → Arztbrief (Gemini backend)</h1>
 
   <div class="row">
     <span class="small">Backend URL:</span>
-    <input id="backendUrl" type="text" size="50" />
-    <span class="pill">POST /dictate</span>
+    <input id="backendUrl" type="text" />
+    <span class="pill">POST /format</span>
   </div>
 
   <div class="row">
-    <span class="small">Microphone:</span>
-    <select id="micSelect"></select>
-
-    <button id="btnInit">Enable Mic</button>
-    <button id="btnStart" disabled>Start (max 5 min)</button>
+    <button id="btnStart">Start Dictation</button>
     <button id="btnStop" disabled>Stop</button>
-
-    <span id="timer" class="pill">00:00</span>
-    <span id="codec" class="pill">codec: —</span>
+    <span id="lang" class="pill">de-DE</span>
+    <span id="support" class="pill">Speech: —</span>
   </div>
 
-  <div id="status" class="status warn">Click <b>Enable Mic</b> first.</div>
+  <div id="status" class="status warn">
+    Uses browser speech recognition (Chrome/Edge). Then formats via your Gemini backend.
+  </div>
 
   <div class="row">
+    <button id="btnFormat" disabled>Format to Brief</button>
     <button id="btnCopy" disabled>Copy brief</button>
     <button id="btnClear">Clear</button>
   </div>
 
-  <textarea id="output" placeholder="Your brief appears here..." spellcheck="false"></textarea>
+  <div class="row">
+    <div style="flex:1">
+      <div class="small">Live transcript (editable)</div>
+      <textarea id="transcript" placeholder="Your transcript will appear here..."></textarea>
+    </div>
+  </div>
+
+  <div class="row">
+    <div style="flex:1">
+      <div class="small">Final brief</div>
+      <textarea id="output" placeholder="Formatted brief appears here..."></textarea>
+    </div>
+  </div>
 
 <script>
 (() => {
   const DEFAULT_BACKEND_BASE = "https://web-production-2ecad.up.railway.app";
-  const MAX_SECONDS = 5 * 60;
-
-  const REQUIRED_SECTIONS = [
-    "Anamnese:",
-    "Klinische Untersuchung:",
-    "Bildgebung:",
-    "Therapie:",
-  ];
+  const REQUIRED_SECTIONS = ["Anamnese:", "Klinische Untersuchung:", "Bildgebung:", "Therapie:"];
 
   const backendUrlEl = document.getElementById("backendUrl");
-  const micSelect = document.getElementById("micSelect");
-  const btnInit = document.getElementById("btnInit");
   const btnStart = document.getElementById("btnStart");
   const btnStop = document.getElementById("btnStop");
+  const btnFormat = document.getElementById("btnFormat");
   const btnCopy = document.getElementById("btnCopy");
   const btnClear = document.getElementById("btnClear");
   const statusEl = document.getElementById("status");
+  const transcriptEl = document.getElementById("transcript");
   const outputEl = document.getElementById("output");
-  const timerEl = document.getElementById("timer");
-  const codecEl = document.getElementById("codec");
+  const supportEl = document.getElementById("support");
 
   backendUrlEl.value = DEFAULT_BACKEND_BASE;
-
-  let stream = null;
-  let recorder = null;
-  let chunks = [];
-  let tick = null;
-  let seconds = 0;
 
   function setStatus(msg, kind="warn") {
     statusEl.className = `status ${kind}`;
     statusEl.innerHTML = msg;
   }
 
-  function fmtTime(s) {
-    const mm = String(Math.floor(s / 60)).padStart(2, "0");
-    const ss = String(s % 60).padStart(2, "0");
-    return `${mm}:${ss}`;
-  }
-
-  function pickMimeType() {
-    const candidates = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/ogg;codecs=opus",
-      "audio/ogg",
-    ];
-    for (const t of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
-    }
-    return "";
-  }
-
-  async function listMics() {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const mics = devices.filter(d => d.kind === "audioinput");
-
-    micSelect.innerHTML = "";
-    if (mics.length === 0) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "No microphones found";
-      micSelect.appendChild(opt);
-      micSelect.disabled = true;
-      return;
-    }
-    micSelect.disabled = false;
-
-    mics.forEach((m, i) => {
-      const opt = document.createElement("option");
-      opt.value = m.deviceId;
-      opt.textContent = m.label || `Microphone ${i + 1}`;
-      micSelect.appendChild(opt);
-    });
-  }
-
-  async function enableMic() {
-    try {
-      setStatus("Requesting microphone permission…", "warn");
-
-      const deviceId = micSelect.value || undefined;
-      const constraints = { audio: deviceId ? { deviceId: { exact: deviceId } } : true };
-
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        stream = null;
-      }
-
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
-      await listMics();
-
-      btnStart.disabled = false;
-      setStatus("Mic ready. Click <b>Start</b> to record.", "ok");
-    } catch (e) {
-      console.error(e);
-      setStatus(`Mic permission failed: <code>${e?.message || e}</code>`, "err");
-      btnStart.disabled = true;
-    }
-  }
-
-  function startTimer() {
-    seconds = 0;
-    timerEl.textContent = fmtTime(seconds);
-    tick = setInterval(() => {
-      seconds += 1;
-      timerEl.textContent = fmtTime(seconds);
-      if (seconds >= MAX_SECONDS) stopRecording(true);
-    }, 1000);
-  }
-
-  function stopTimer() {
-    if (tick) clearInterval(tick);
-    tick = null;
+  function normalizeBaseUrl(raw) {
+    let base = (raw || "").trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(base)) base = "https://" + base;
+    return base;
   }
 
   function ensureAllSections(text) {
@@ -177,95 +98,109 @@
     return out.trim();
   }
 
-  function normalizeBaseUrl(raw) {
-    let base = (raw || "").trim().replace(/\/+$/, "");
-    if (!/^https?:\/\//i.test(base)) base = "https://" + base;
-    return base;
-  }
-
-  async function startRecording() {
-    if (!stream) {
-      setStatus("Mic not enabled. Click <b>Enable Mic</b> first.", "warn");
-      return;
-    }
-
-    const mimeType = pickMimeType();
-    codecEl.textContent = `codec: ${mimeType || "browser default"}`;
-
-    chunks = [];
-    try {
-      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    } catch (e) {
-      console.error(e);
-      setStatus(`MediaRecorder failed: <code>${e?.message || e}</code>`, "err");
-      return;
-    }
-
-    recorder.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size > 0) chunks.push(ev.data);
-    };
-
-    recorder.onstop = async () => {
-      stopTimer();
-      btnStart.disabled = false;
-      btnStop.disabled = true;
-
-      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-      setStatus(`Uploading audio (${(blob.size/1024/1024).toFixed(2)} MB)…`, "warn");
-
-      try {
-        const base = normalizeBaseUrl(backendUrlEl.value);
-        const endpoint = `${base}/dictate`;
-
-        const fd = new FormData();
-        const filename = blob.type.includes("ogg") ? "audio.ogg" : "audio.webm";
-        fd.append("audio", blob, filename);
-
-        // ✅ CORS-safe fetch (fixes "Failed to fetch")
-        const res = await fetch(endpoint, {
-          method: "POST",
-          mode: "cors",
-          credentials: "omit",
-          body: fd
-        });
-
-        if (!res.ok) {
-          const t = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status} ${res.statusText} ${t ? ("— " + t.slice(0, 200)) : ""}`);
-        }
-
-        const data = await res.json();
-        const brief = ensureAllSections(String(data.text || ""));
-
-        outputEl.value = brief;
-        btnCopy.disabled = !brief;
-        setStatus("Done. Brief is ready to copy.", "ok");
-      } catch (e) {
-        console.error(e);
-        setStatus(`Upload/processing failed: <code>${e?.message || e}</code>`, "err");
-      }
-    };
-
-    recorder.start();
+  // --- Web Speech API setup ---
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    supportEl.textContent = "Speech: NOT supported";
+    setStatus("Your browser does not support Web Speech API. Use Chrome/Edge.", "err");
     btnStart.disabled = true;
-    btnStop.disabled = false;
-    btnCopy.disabled = true;
-    setStatus("Recording… Click <b>Stop</b> when finished.", "warn");
-    startTimer();
+    return;
   }
+  supportEl.textContent = "Speech: supported";
 
-  function stopRecording(auto=false) {
-    if (!recorder) return;
+  const rec = new SpeechRecognition();
+  rec.lang = "de-DE";
+  rec.interimResults = true;
+  rec.continuous = true;
+
+  let listening = false;
+  let finalText = "";
+
+  rec.onresult = (event) => {
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const chunk = event.results[i][0].transcript;
+      if (event.results[i].isFinal) finalText += chunk + " ";
+      else interim += chunk;
+    }
+    transcriptEl.value = (finalText + interim).trim();
+    btnFormat.disabled = transcriptEl.value.trim().length === 0;
+  };
+
+  rec.onerror = (e) => {
+    console.error(e);
+    setStatus(`Speech error: <code>${e.error || "unknown"}</code>`, "err");
+    listening = false;
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+  };
+
+  rec.onend = () => {
+    listening = false;
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    if (transcriptEl.value.trim()) btnFormat.disabled = false;
+    setStatus("Dictation stopped.", "ok");
+  };
+
+  btnStart.addEventListener("click", () => {
     try {
-      recorder.stop();
-      setStatus(auto ? "Max length reached. Stopping…" : "Stopping… Processing…", "warn");
+      finalText = transcriptEl.value.trim() ? (transcriptEl.value.trim() + " ") : "";
+      rec.start();
+      listening = true;
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      btnFormat.disabled = true;
+      setStatus("Listening… speak now. Click Stop when finished.", "warn");
     } catch (e) {
       console.error(e);
-      setStatus(`Stop failed: <code>${e?.message || e}</code>`, "err");
+      setStatus(`Could not start speech recognition: <code>${e.message || e}</code>`, "err");
     }
-  }
+  });
 
-  async function copyBrief() {
+  btnStop.addEventListener("click", () => {
+    if (!listening) return;
+    setStatus("Stopping…", "warn");
+    rec.stop();
+  });
+
+  btnFormat.addEventListener("click", async () => {
+    const text = transcriptEl.value.trim();
+    if (!text) return;
+
+    setStatus("Formatting via backend…", "warn");
+    btnFormat.disabled = true;
+    btnCopy.disabled = true;
+
+    try {
+      const base = normalizeBaseUrl(backendUrlEl.value);
+      const endpoint = `${base}/format`;
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        mode: "cors",
+        credentials: "omit",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `HTTP ${res.status} ${res.statusText}`);
+      }
+
+      const brief = ensureAllSections(String(data.text || ""));
+      outputEl.value = brief;
+      btnCopy.disabled = !brief;
+      setStatus("Done. Brief is ready to copy.", "ok");
+    } catch (e) {
+      console.error(e);
+      setStatus(`Format failed: <code>${e.message || e}</code>`, "err");
+      btnFormat.disabled = false;
+    }
+  });
+
+  btnCopy.addEventListener("click", async () => {
     const text = outputEl.value.trim();
     if (!text) return;
     try {
@@ -277,22 +212,16 @@
       document.execCommand("copy");
       setStatus("Copied (fallback) ✅", "ok");
     }
-  }
+  });
 
-  btnInit.addEventListener("click", enableMic);
-  btnStart.addEventListener("click", startRecording);
-  btnStop.addEventListener("click", () => stopRecording(false));
-  btnCopy.addEventListener("click", copyBrief);
   btnClear.addEventListener("click", () => {
+    finalText = "";
+    transcriptEl.value = "";
     outputEl.value = "";
+    btnFormat.disabled = true;
     btnCopy.disabled = true;
     setStatus("Cleared.", "warn");
   });
-
-  micSelect.addEventListener("change", enableMic);
-  navigator.mediaDevices?.addEventListener?.("devicechange", listMics);
-
-  listMics().catch(() => {});
 })();
 </script>
 </body>
